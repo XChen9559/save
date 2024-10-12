@@ -1,43 +1,43 @@
 // HumanDetectVC.cpp : Defines the entry point for the console application.
 //
 
-#include <string.h>
-#include <time.h>
-#include <stdlib.h>
-#include <cstdio>
-#include <iostream>
-#include <ctime>
-#include <vector>
+#include <string.h>												// header file: consists of functions and macros, eg: strcmp,...
+#include <time.h>												// about time, eg: time(),...
+#include <stdlib.h>												// some system functions, eg: free(), malloc(),...
+#include <cstdio>												// C++ header file: file I/O, eg: fopen, fcanf,...
+#include <iostream>												// input/output stream, eg: std::count, std::cin
+#include <ctime>												// c++ time
+#include <vector>												// length changable array
 
-using namespace std;
+using namespace std;											// open standard namespace, std is space identifier, where C++ standard lib functions and objects are defined
 
 //#include "omp.h"
 
-#include "tensorflow/lite/interpreter.h"
-#include "tensorflow/lite/kernels/register.h"
-#include "tensorflow/lite/model.h"
-#include "tensorflow/lite/optional_debug_tools.h"
-#include "tensorflow/lite/c/c_api.h"
-#include "models4.h"
+#include "tensorflow/lite/interpreter.h"						// load model, input/output tensor, infer
+#include "tensorflow/lite/kernels/register.h"					// register???
+#include "tensorflow/lite/model.h"								// about model
+#include "tensorflow/lite/optional_debug_tools.h"				// debug tools
+#include "tensorflow/lite/c/c_api.h"							// code c API
+#include "models4.h"                                            // our model
 
 
-#include "malloc.h"
-#include "kiss_fftr.h"
+#include "malloc.h"												// dynamic allocate memory
+#include "kiss_fftr.h"											// Keep it simple, stupid FFT
 
 //#include "sys/resource.h"
 //#include "mcheck.h"
 
-using namespace tflite;
-clock_t start2,end2,start3,end3,start4,end4,start5,end5,start6,end6;
+using namespace tflite;											// again
+clock_t start2,end2,start3,end3,start4,end4,start5,end5,start6,end6; // calculate time, clock_t is defined in time.h
 
-#define TFLITE_MINIMAL_CHECK(x)                              \
+#define TFLITE_MINIMAL_CHECK(x)                              \		// used for minimal check, defined in tensorflow lite
   if (!(x)) {                                                \
-    fprintf(stderr, "Error at %s:%d\n", __FILE__, __LINE__); \
-    exit(1);                                                 \
+    fprintf(stderr, "Error at %s:%d\n", __FILE__, __LINE__); \		// print error info,filename, line no
+    exit(1);                                                 \		// exit the program
   }
 
 //int threadnum = 2;
-const int framelen_wb = 320;
+const int framelen_wb = 320;										//
 const int framelen_swb = 640;
 const int bufferlen_wb = framelen_wb * 2;
 const int bufferlen_swb = framelen_swb * 2;
@@ -50,11 +50,11 @@ const int bufferlen_swb = framelen_swb * 2;
 #define HwinSize WinSize/2
 
 #define OVERLAP (WinSize-HOPSIZE)
-#define BufferSize (HOPSIZE*10 + OVERLAP)
+#define BufferSize (HOPSIZE*10 + OVERLAP)						// 10 frams???
 #define WriteSize   HOPSIZE*10
 
 
-#define DimFB 1024
+#define DimFB 1024												// dim of frequency bins
 #define HDimFB DimFB/2
 
 
@@ -63,14 +63,14 @@ const int bufferlen_swb = framelen_swb * 2;
 
 static float win[WinSize] = {
 #include "win_hop960.txt"
-};
+};															 // utils.py win_hop960
 
 struct AIFilterBuffer{
 
 	
-	float in_L[BufferSize]; // [1, 9600]
+	float in_L[BufferSize]; // [1, 9600]					// left and right?
 	float in_R[BufferSize]; // [1, 9600]
-	float in_state[5920]; // [1, 2, 408, 48]
+	float in_state[5920]; // [1, 2, 408, 48]				// state????
 
 	float out_L[BufferSize]; // [2, 9600]
 	float out_R[BufferSize]; // [2, 9600]
@@ -78,7 +78,7 @@ struct AIFilterBuffer{
 	
 }; // AIFilterBufferGlobal;
 
-float input_L[10*1024];
+float input_L[10*1024];										// frequency input??? 1024?
 float input_R[10*1024];
 float input_state[5920];
 
@@ -96,11 +96,11 @@ float temp_R[10*1024];
 
 
 #define Nfft 1536
-kiss_fftr_cfg cfg = kiss_fftr_alloc(Nfft, 0);
+kiss_fftr_cfg cfg = kiss_fftr_alloc(Nfft, 0);				// condigure fft----> flag 0: FFT; 1: inverse FFT
 kiss_fftr_cfg cfgi = kiss_fftr_alloc(Nfft, 1);
 
 
-   TfLiteModel* model;
+   TfLiteModel* model;										// pointer 
    TfLiteInterpreterOptions* options;
    TfLiteInterpreter* interpreter;
    TfLiteTensor* input_tensor0;
@@ -127,7 +127,7 @@ void init()
 //    }
 
     //model = TfLiteModelCreateFromFile("/data/ylx/model1_20ms.tflite");
-    model = TfLiteModelCreateFromFile("/home/samsung/users/heng.zhu/pretrained_model/model4_20ms/model4_se.tflite");
+	model = TfLiteModelCreateFromFile("/home/samsung/users/heng.zhu/pretrained_model/model4_20ms/model4_se.tflite");	// load model; need c_api.h and .so
 		
 		// Build the interpreter
 		//tflite::ops::builtin::BuiltinOpResolver resolver;
@@ -136,9 +136,9 @@ void init()
   	//tflite::InterpreterBuilder(*(tflitehandle->model), tflitehandle->resolver)(&(tflitehandle->interpreter));
 		//printf("interpreter init \n");
      
-     options = TfLiteInterpreterOptionsCreate(); 
+     options = TfLiteInterpreterOptionsCreate();																		// config options
      
-     interpreter = TfLiteInterpreterCreate(model, options);
+     interpreter = TfLiteInterpreterCreate(model, options);																// create interpreter
      //printf("interpreter init \n");
 //     printf(" interpreter begin: 0x%x \n",interpreter);
          // Create a weights cache that you can pass to XNNPACK delegate.
@@ -146,13 +146,13 @@ void init()
     
     
     
-     TfLiteInterpreterAllocateTensors(interpreter);
+     TfLiteInterpreterAllocateTensors(interpreter);																		// allocate memory
 //     
 //     //printf(" interpreter after: 0x%x \n",interpreter);
 //    
 //        
 //
-    input_tensor0 =  TfLiteInterpreterGetInputTensor(interpreter, 0);
+    input_tensor0 =  TfLiteInterpreterGetInputTensor(interpreter, 0);													// get input,  params: interpreter pointer, 0,1,2: indexs
     input_tensor1 =  TfLiteInterpreterGetInputTensor(interpreter, 1);
     input_tensor2 =  TfLiteInterpreterGetInputTensor(interpreter, 2);
 
