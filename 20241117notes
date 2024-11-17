@@ -3,3 +3,10 @@ TWO-STAGE NEURAL NETWORK FOR ICASSP 2023 SPEECH SIGNAL IMPROVEMENT CHALLENGE
 High-Resolution Speech Restoration with Latent Diffusion Model
 
 基于信号处理和深度学习的语音修复技术研究
+
+
+在当前通讯系统的音频架构中，在音频设备，音频算法，音频编码器等环节均可能存在影响音质体验的因素。
+由于以上环节引起的频谱缺失或音频受损，需要音频信号修复技术。它可以根据已有的信息来推测缺失的频谱信息，与语音增强（包括降噪、去混响、回声消除）方法有本质性区别。该方向目前受到学术界和业界的广泛关注，例如ICASSP在2023年推出了Speech Signal Improvement Challenge挑战赛，
+华为在2024年首创AI语音修复功能，帮助有语言障碍的用户恢复说话。
+
+基于本人的研究背景，拟开展基于信号处理和深度学习的音频信号修复技术研究。
