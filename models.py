@@ -1,600 +1,413 @@
-#!/usr/bin/python3
-# -*- coding: utf-8 -*-
-# @Time     : 19-11-1 09:12:12
-# @Author   : zm
-# @File     : model.py
-# @Software : PyCharm
-
+from torchlibrosa.stft import Spectrogram, LogmelFilterBank
+from torchlibrosa.augmentation import SpecAugmentation
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-import numpy
-from numpy.lib import stride_tricks
-from utils import overlap_and_add, device
-from torch.autograd import Variable
-#import ipdb
 
-EPS = 1e-8
-
-class AEncoder(nn.Module):
-    def __init__(self,feat_dim=[4,8,16,32,96],trunk_size=10):
-        super(AEncoder, self).__init__()
-        #self.pad1 = nn.ConstantPad2d((0, 0, 1, 0), value=0.)
-        #self.pad2 = nn.ConstantPad2d((1, 1, 1, 0), value=0.)
-        self.en1 = nn.Conv2d(1, feat_dim[0], kernel_size=(3, 4), stride=(2, 2),padding=(0,0)) #,bias=False
-        self.act1= nn.ELU(alpha=1.0)    
-        self.en2 =  nn.Conv2d(feat_dim[0], feat_dim[1], kernel_size=(3, 4), stride=(2, 2),padding=(0,0))
-        self.act2= nn.ELU(alpha=1.0)   
-        self.en3 = nn.Conv2d(feat_dim[1], feat_dim[2], kernel_size=(1, 4), stride=(1, 2),padding=(0,0))
-        self.act3= nn.ELU(alpha=1.0)   
-        self.en4 =  nn.Conv2d(feat_dim[2], feat_dim[3], kernel_size=(1, 4), stride=(1, 2),padding=(0,0))
-        self.act4= nn.ELU(alpha=1.0)    
-        self.en5 =  nn.Conv2d(feat_dim[3], feat_dim[4], kernel_size=(1, 4), stride=(1, 2),padding=(0,0))
-        self.act5= nn.ELU(alpha=1.0)
-        self.freq_upsampling= nn.Linear(30,37)
-        self.enc = feat_dim[4]
-        self.trunk_size = trunk_size
-    def forward(self, x):
-        #x_list = []
-        x = x.unsqueeze(dim=1)
-        
-        B,C,T,Freq = x.shape
-        rest = (T-T//self.trunk_size*self.trunk_size)
-        #print('x:',x.shape,rest) 
-        if rest>0 :
-           x = torch.cat([x,torch.zeros([B,C,self.trunk_size-rest,Freq]).cuda()],dim=2)
-        
-        x=x.reshape(B,C,-1,self.trunk_size,Freq)
-        x=x.permute(0,2,1,3,4)
-        x=x.reshape(-1,C,self.trunk_size,Freq)
-        #print('layer1:',x.shape,self.trunk_size)
-        x = self.act1(self.en1(x))
-        #print('layer1:',x.shape)
-        x = self.act2(self.en2(x))
-        #print('layer2:',x.shape)
-        x = self.act3(self.en3(x))
-        #print('layer3:',x.shape)
-        x = self.act4(self.en4(x))
-        #print('layer4:',x.shape)
-        x = self.act5(self.en5(x))
-        #print('layer5:',x.shape)
-        
-        x = self.freq_upsampling(x)
-        x=x.repeat(1,1,self.trunk_size,1)  ##  
-       
-        x= x.permute(0,2,1,3)
-        x=x.reshape(B,-1,self.enc,37)
-        
-        if rest >0 :
-           x= x[:,:-(self.trunk_size-rest),:,:]
-        
-        return x.reshape(-1,self.enc,37)
-        
-
-class Encoder(nn.Module):
-    """Estimation of the nonnegative mixture weight by a 1-D conv layer.
-    """
-    def __init__(self, W=2, N=64, seg_size=129):
-        super(Encoder, self).__init__()
-        # Hyper-parameter
-        self.W, self.N = W, N
-        self.seg_size = seg_size
-        # Components
-        # 50% overlap
-        #self.conv1d_U = nn.Conv1d(1, N, kernel_size=W, stride=W // 2, bias=False)
-        self.conv1d_U_Subband1 = nn.Conv1d(1, N, kernel_size=8, stride=4, padding=0, bias=False)        # 2b*8 = 16b: 0~15
-        self.conv1d_U_Subband2 = nn.Conv1d(1, N, kernel_size=12, stride=8, padding=0, bias=False)       # 4b*8 = 32b: 16~47
-        self.conv1d_U_Subband3 = nn.Conv1d(1, N, kernel_size=20, stride=16, padding=0, bias=False)      # 8b*10 = 80b: 48~127
-        self.conv1d_U_Subband4 = nn.Conv1d(1, N, kernel_size=36, stride=32, padding=0, bias=False)      # 16b*8 = 128b: 128~255                
-        self.conv1d_U_Subband5 = nn.Conv1d(1, N, kernel_size=128, stride=128, padding=0, bias=False)      #16b*8 = 128b: 256~384  
-        self.conv1d_U_Subband6 = nn.Conv1d(1, N, kernel_size=258, stride=256, padding=0, bias=False)      # 32b*4 = 256b: 384~512
-        
-                
-    def forward(self, mixture,x_glob,mel_feat):
-        """
-        Args:
-            mixture: [B, T], B is batch size, T is #samples
-        Returns:
-            mixture_w: [B, N, L], where L = (T-W)/(W/2)+1 = 2T/W-1
-            L is the number of time steps
-        """
-        batch_size = mixture.shape[0]
-        mixture = torch.unsqueeze(mixture.view(-1, self.seg_size*2), 1)  # [B, 1, T]
-        mixture_subband1 = torch.cat([torch.zeros(mixture.shape[0], mixture.shape[1], 2).type(mixture.type()), mixture[: ,: ,0:34]], axis=2) ## 8
-        mixture_subband2 = mixture[: ,: ,30:98]
-        mixture_subband3 = mixture[:, :, 94:258] ##-4k  160 = 10*160
-        mixture_subband4 = mixture[:, :, 254:514] ##4-8k  256=8*32
-        mixture_subband5 = mixture[:, :, 512:768] ##8-12k # 256 = 128*2   8--》2       
-        mixture_subband6 = torch.cat([mixture[:, :, 766:1024], torch.zeros(mixture.shape[0], mixture.shape[1], 2).type(mixture.type())], axis=2) ## 256 = 64*4   1
-        #print(mixture_subband1.shape,mixture_subband2.shape,mixture_subband3.shape,mixture_subband4.shape)
-        mixture_w_subband1 = F.relu(self.conv1d_U_Subband1(mixture_subband1))  # [B, N, 8]
-        mixture_w_subband2 = F.relu(self.conv1d_U_Subband2(mixture_subband2))  # [B, N, 8]
-        mixture_w_subband3 = F.relu(self.conv1d_U_Subband3(mixture_subband3))  # [B, N, 10]
-        mixture_w_subband4 = F.relu(self.conv1d_U_Subband4(mixture_subband4))  # [B, N, 8]
-        mixture_w_subband5 = F.relu(self.conv1d_U_Subband5(mixture_subband5))  # [B, N, 8]
-        mixture_w_subband6 = F.relu(self.conv1d_U_Subband6(mixture_subband6))  # [B, N, 4]
-        mixture_w = torch.cat([mixture_w_subband1, mixture_w_subband2, mixture_w_subband3, mixture_w_subband4, mixture_w_subband5, mixture_w_subband6], axis=2)
-        #print(mixture_w_subband1.shape,mixture_w_subband2.shape,mixture_w_subband3.shape,mixture_w_subband4.shape,mixture_w_subband5.shape,mixture_w_subband6.shape)
-        #print(mixture_w.shape,x_glob.shape,mel_feat.shape)
-        mixture_w = mixture_w+x_glob+mel_feat
-        mixture_w = mixture_w.permute(0,2,1).contiguous().view(batch_size, -1, self.N).permute(0,2,1).contiguous()
-        
-        #mixture_z = self.rnn(mixture_w.permute(0, 2, 1))
-        #mixture_w = F.relu(mixture_z.permute(0, 2, 1))  # [B, N, L]
-
-        return mixture_w
-
-class Decoder(nn.Module):
-    def __init__(self, E, W):
-        super(Decoder, self).__init__()
-        # Hyper-parameter
-        self.E, self.W = E, W
-        # Components
-        #self.basis_signals = nn.Linear(E, 2, bias=False)
-        self.basis_signals_subband1 = nn.Linear(E, 4, bias=False)
-        self.basis_signals_subband2 = nn.Linear(E, 8, bias=False)
-        self.basis_signals_subband3 = nn.Linear(E, 16, bias=False)
-        self.basis_signals_subband4 = nn.Linear(E, 32, bias=False)
-        self.basis_signals_subband5 = nn.Linear(E, 128, bias=False)
-        self.basis_signals_subband6 = nn.Linear(E, 256, bias=False)
-
-    def forward(self, mixture_w, est_mask):
-        """
-        Args:
-            mixture_w: [B, E, L]
-            est_mask: [B, C, E, L]
-        Returns:
-            est_source: [B, C, T]
-        """
-        # D = W * M
-        #print(mixture_w.shape)
-        #print(est_mask.shape)
-        source_w = torch.unsqueeze(mixture_w, 1) * est_mask  # [B, C, E, L]
-
-        #source_w = torch.unsqueeze(mixture_w, 1) + est_mask  # [B, C, E, L]
-        #source_w = est_mask  # [B, C, E, L]
-        source_w = torch.transpose(source_w, 2, 3) # [B, C, L, E]
-        s = source_w.shape
-        source_w = source_w.view(s[0], s[1], -1, 37, s[3])
-        source_w_subband1 = source_w[:,:,:,0:8,:]
-        source_w_subband2 = source_w[:, :, :, 8:16, :]
-        source_w_subband3 = source_w[:, :, :, 16:26, :]
-        source_w_subband4 = source_w[:, :, :, 26:34, :]
-        source_w_subband5 = source_w[:, :, :, 34:36, :]
-        source_w_subband6 = source_w[:, :, :, 36:37, :]
-
-        # S = DV
-        #est_source = self.basis_signals(source_w)  # [B, C, L, W]
-        est_source_subband1 = self.basis_signals_subband1(source_w_subband1)  # [B, C, L, W]
-        est_source_subband2 = self.basis_signals_subband2(source_w_subband2)  # [B, C, L, W]
-        est_source_subband3 = self.basis_signals_subband3(source_w_subband3)  # [B, C, L, W]
-        est_source_subband4 = self.basis_signals_subband4(source_w_subband4)  # [B, C, L, W]
-        est_source_subband5 = self.basis_signals_subband5(source_w_subband5)  # [B, C, L, W]
-        est_source_subband6 = self.basis_signals_subband6(source_w_subband6)  # [B, C, L, W]
-        
-        s = est_source_subband1.shape
-        est_source_subband1 = est_source_subband1.view(s[0], s[1], s[2], -1)
-        est_source_subband2 = est_source_subband2.view(s[0], s[1], s[2], -1)
-        est_source_subband3 = est_source_subband3.view(s[0], s[1], s[2], -1)
-        est_source_subband4 = est_source_subband4.view(s[0], s[1], s[2], -1)
-        est_source_subband5 = est_source_subband5.view(s[0], s[1], s[2], -1)
-        est_source_subband6 = est_source_subband6.view(s[0], s[1], s[2], -1)
-        est_source = torch.cat([est_source_subband1, est_source_subband2, est_source_subband3, est_source_subband4,est_source_subband5,est_source_subband6], axis=3)
-        #print(est_source_subband1.shape, est_source_subband2.shape, est_source_subband3.shape, est_source_subband4.shape,est_source_subband5.shape,est_source_subband6.shape)
-        #print(est_source_subband1.shape[3]+ est_source_subband2.shape[3]+  est_source_subband3.shape[3]+ est_source_subband4.shape[3]+ est_source_subband5.shape[3]+ est_source_subband6.shape[3])
-        #est_source = est_source.view(s[0], s[1], -1, 256)
-        s = est_source.shape
-        est_source = est_source.view(s[0], s[1], -1)
-        #est_source = overlap_and_add(est_source, self.W//2) # B x C x T
-        #est_source = overlap_and_add(est_source, 1)  # B x C x T
-        return est_source
-class ColSingleRNN(nn.Module):
-    """
-    Container module for a single RNN layer.
-
-    args:
-        rnn_type: string, select from 'RNN', 'LSTM' and 'GRU'.
-        input_size: int, dimension of the input feature. The input should have shape
-                    (batch, seq_len, input_size).
-        hidden_size: int, dimension of the hidden state.
-        dropout: float, dropout ratio. Default is 0.
-        bidirectional: bool, whether the RNN layers are bidirectional. Default is False.
-    """
-
-    def __init__(self, rnn_type, input_size, hidden_size, dropout=0, bidirectional=False):
-        super(ColSingleRNN, self).__init__()
-
-        self.rnn_type = rnn_type
-        self.input_size = input_size
-        self.hidden_size = hidden_size
-        self.num_direction = int(bidirectional) + 1
-
-        #self.h = torch.zeros([self.num_direction, 250, self.input_size])
-        #self.c = torch.zeros([self.num_direction, 250, self.input_size])
-
-        self.rnn = getattr(nn, rnn_type)(input_size, hidden_size, 1, dropout=dropout, batch_first=True,
-                                         bidirectional=bidirectional)
-
-        # linear projection layer
-        self.proj = nn.Linear(hidden_size * self.num_direction, input_size)
-
-    def forward(self, input, h):
-        # input shape: batch, seq, dim
-        #input = input.to(device)
-        output = input
-        #ipdb.set_trace()
-        rnn_output, h = self.rnn(output, h)
-        rnn_output = self.proj(rnn_output.contiguous().view(-1, rnn_output.shape[2])).view(output.shape)
-        return rnn_output, h
-        
-class SingleRNN(nn.Module):
-    """
-    Container module for a single RNN layer.
-
-    args:
-        rnn_type: string, select from 'RNN', 'LSTM' and 'GRU'.
-        input_size: int, dimension of the input feature. The input should have shape
-                    (batch, seq_len, input_size).
-        hidden_size: int, dimension of the hidden state.
-        dropout: float, dropout ratio. Default is 0.
-        bidirectional: bool, whether the RNN layers are bidirectional. Default is False.
-    """
-
-    def __init__(self, rnn_type, input_size, hidden_size, dropout=0, bidirectional=False):
-        super(SingleRNN, self).__init__()
-
-        self.rnn_type = rnn_type
-        self.input_size = input_size
-        self.hidden_size = hidden_size
-        self.num_direction = int(bidirectional) + 1
-
-        self.rnn = getattr(nn, rnn_type)(input_size, hidden_size, 1, dropout=dropout, batch_first=True,
-                                         bidirectional=bidirectional)
-
-        # linear projection layer
-        self.proj = nn.Linear(hidden_size * self.num_direction, input_size)
-
-    def forward(self, input):
-        # input shape: batch, seq, dim
-        #input = input.to(device)
-        output = input
-        rnn_output, _ = self.rnn(output)
-        rnn_output = self.proj(rnn_output.contiguous().view(-1, rnn_output.shape[2])).view(output.shape)
-        return rnn_output
-
-
-# dual-path RNN
-class DPRNN(nn.Module):
-    """
-    Deep duaL-path RNN.
-
-    args:
-        rnn_type: string, select from 'RNN', 'LSTM' and 'GRU'.
-        input_size: int, dimension of the input feature. The input should have shape
-                    (batch, seq_len, input_size).
-        hidden_size: int, dimension of the hidden state.
-        output_size: int, dimension of the output size.
-        dropout: float, dropout ratio. Default is 0.
-        num_layers: int, number of stacked RNN layers. Default is 1.
-        bidirectional: bool, whether the RNN layers are bidirectional. Default is False.
-    """
-
-    def __init__(self, rnn_type, input_size, hidden_size, output_size,trunk_size,
-                 dropout=0, num_layers=1, bidirectional=True):
-        super(DPRNN, self).__init__()
-
-        self.input_size = input_size
-        self.output_size = output_size
-        self.hidden_size = hidden_size
-        self.trunk_size=trunk_size
-        # dual-path RNN
-        self.trunk_rnn = nn.ModuleList([])
-        self.row_rnn = nn.ModuleList([])
-        self.col_rnn1 = nn.ModuleList([])
-        self.col_rnn2 = nn.ModuleList([])
-        self.proj_col = nn.ModuleList([])
-        #self.row_norm = nn.ModuleList([])
-        #self.col_norm = nn.ModuleList([])
-        for i in range(num_layers):
-            self.row_rnn.append(SingleRNN('LSTM', input_size, hidden_size, dropout,
-                                          bidirectional=True))  # intra-segment RNN is always noncausal
-            self.col_rnn1.append(ColSingleRNN('GRU', input_size, hidden_size, dropout, bidirectional=False))
-            self.col_rnn2.append(ColSingleRNN('GRU', input_size, hidden_size, dropout, bidirectional=False))
-            self.proj_col.append(nn.Linear(hidden_size*2,hidden_size))
-
-        # output layer
-        self.output = nn.Sequential(nn.ReLU(),
-                                    nn.Conv2d(input_size, output_size, 1)
-                                    )
-
-    def forward(self, input, h_list1):
-        # input shape: batch, N, dim1, dim2
-        # apply RNN on dim1 first and then dim2
-        # output shape: B, output_size, dim1, dim2
-        #input = input.to(device)
-        batch_size, N, dim1, dim2 = input.shape
-        #print(input.shape)
-        output = input
-        j = 0
-        for i in range(len(self.row_rnn)):
-            row_input = output.permute(0, 3, 2, 1).contiguous().view(batch_size*dim2, dim1, N)  # B*dim2, dim1, N
-            row_output = self.row_rnn[i](row_input)  # B*dim2, dim1, H
-            row_output = row_output.transpose(1,2)
-            #row_output = self.row_norm[i](row_output)
-            row_output = row_output.transpose(1, 2)
-            row_output = row_output.view(batch_size, dim2, dim1, -1).permute(0, 3, 2,
-                                                                             1).contiguous()  # B, N, dim1, dim2
-            output = output + row_output
-            #row_input = output.permute(0, 3, 2, 1).contiguous().view(batch_size, -1, N)  # B*dim2, dim1, N
-            #row_output = self.row_rnn[i](row_input)  # B*dim2, dim1, H
-
-            #col_input = output.permute(0, 2, 3, 1).contiguous().view(batch_size*dim1, dim2, -1)  # B*dim1, dim2, N
-            col_input = output.permute(0, 2, 3, 1).contiguous().view(batch_size*dim1*dim2//self.trunk_size, self.trunk_size, -1)  # B*dim1, dim2, N
-            col_input = col_input.reshape(batch_size*dim1,dim2//self.trunk_size, self.trunk_size, -1)
-            col_output = torch.zeros([batch_size*dim1, dim2//self.trunk_size, self.trunk_size, self.input_size]).type(col_input.type())
-            
-            for cl in range(dim2//self.trunk_size):
-            #h[1:,:,:] = torch.zeros([1, batch_size*dim1, self.input_size]).type(col_input.type())
-            #col_output[:,cl], h = self.col_rnn[i](col_input_1,h)  # B*dim1, dim2, H
-               h = h_list1[i]
-               col_input_1 = col_input[:,cl,:,:]               
-               col_output1, h1 = self.col_rnn1[i](col_input_1,h)  # B*dim1, dim2, H
-               #print(h1.shape,h_list1[i].shape,i,col_output1.shape)
-               h_list1[i] = h1
-               col_output2, h2 = self.col_rnn2[i](col_input_1.flip(1),h1)  # B*dim1, dim2, H
-               col_output2 = col_output2.flip(1)
-               col_output[:,cl]  = self.proj_col[i](torch.cat([col_output1,col_output2],-1))
-            col_output = col_output.reshape(batch_size, dim1, dim2, -1).permute(0, 3, 1,
-                                                                                2).contiguous()  # B, N, dim1, dim2
-            output = output + col_output
-
-            
-#            if i == 1 or i == 4:
-#                trunk_input = output.permute(0, 2, 3, 1).contiguous().view(batch_size*dim1, dim2, -1)  # B*dim1, dim2, N
-#                trunk_input = trunk_input.reshape(batch_size*dim1, dim2//12, 12, -1).permute(0, 2, 1, 3).reshape(batch_size*dim1*12, dim2//12, -1)
-#                h = h_list2[j]
-#                #ipdb.set_trace()
-#                trunk_output, h = self.trunk_rnn[j](trunk_input, h)  # B*dim1, dim2, H
-#                h_list2[j] = h 
-#                trunk_output = trunk_output.reshape(batch_size*dim1, 12, dim2//12, -1).permute(0, 2, 1, 3)
-#                trunk_output = trunk_output.reshape(batch_size, dim1, dim2, -1).permute(0, 3, 1,
-#                                                                                 2).contiguous()  # B, N, dim1, dim2
-#                output = output + trunk_output
-#                j = j+1
-
-        output = self.output(output) # B, output_size, dim1, dim2
-
-        return output, h_list1
-
+from pytorch_utils import do_mixup, interpolate, pad_framewise_output
  
 
-
-
-# base module for deep DPRNN
-class DPRNN_base(nn.Module):
-    def __init__(self, input_dim, feature_dim, hidden_dim, num_spk=2,
-                 layer=4, group_size=100, trunk_size = 12, bidirectional=True, rnn_type='LSTM'):
-        super(DPRNN_base, self).__init__()
-
-        self.input_dim = input_dim
-        self.feature_dim = feature_dim
-        self.hidden_dim = hidden_dim
-
-        self.layer = layer
-        self.group_size = group_size
-        self.trunk_size = trunk_size
-        self.num_spk = num_spk
-
-        self.eps = 1e-8
-
-        # bottleneck
-        self.BN = nn.Conv1d(self.input_dim, self.feature_dim, 1, bias=False)
-
-        # DPRNN model
-        self.DPRNN = DPRNN(rnn_type, self.feature_dim, self.hidden_dim,
-                                   self.feature_dim * self.num_spk,self.trunk_size,
-                                   num_layers=layer, bidirectional=bidirectional)
-
-    def pad_segment(self, input, group_size, trunk_size):
-        # input is the features: (B, N, T)
-        batch_size, dim, seq_len = input.shape
-        #segment_stride = group_size // 2
-        timelength = seq_len//group_size
-        rest = timelength - timelength // trunk_size* trunk_size  #group_size*chunk_size - seq_len % (group_size*chunk_size)
-        #print('1111111111111',rest,trunk_size,timelength,input.shape)
-        if rest > 0:
-            pad = Variable(torch.zeros(batch_size, dim, group_size*(trunk_size - rest))).type(input.type())
-            input = torch.cat([input, pad], 2)
-
-        #pad_aux = Variable(torch.zeros(batch_size, dim, segment_stride)).type(input.type())
-        #input = torch.cat([pad_aux, input, pad_aux], 2)
-
-        return input, rest
-
-    def split_feature(self, input, group_size, trunk_size):
-        # split the feature into chunks of segment size
-        # input is the features: (B, N, T)
-
-        input, rest = self.pad_segment(input, group_size, trunk_size)
-        batch_size, dim, seq_len = input.shape
-        #segment_stride = group_size // 2
-
-        #segments1 = input[:, :, :-segment_stride].contiguous().view(batch_size, dim, -1, group_size)
-        #segments2 = input[:, :, segment_stride:].contiguous().view(batch_size, dim, -1, group_size)
-        #segments = torch.cat([segments1, segments2], 3).view(batch_size, dim, -1, group_size).transpose(2, 3)
-        #print('32222222222',input.shape,rest)
-        segments = input.contiguous().view(batch_size, dim, -1, group_size).transpose(2, 3)
-
-        return segments.contiguous(), rest
-
-    def merge_feature(self, input, rest,trunk_size):
-        # merge the splitted features into full utterance
-        # input is the features: (B, N, L, K)
-
-        batch_size, dim, group_size, _ = input.shape
-        #segment_stride = group_size // 2
-        #input = input.transpose(2, 3).contiguous().view(batch_size, dim, -1, group_size * 2)  # B, N, K, L
-
-        #input1 = input[:, :, :, :group_size].contiguous().view(batch_size, dim, -1)[:, :, segment_stride:]
-        #input2 = input[:, :, :, group_size:].contiguous().view(batch_size, dim, -1)[:, :, :-segment_stride]
-
-        #output = input1 + input2
+def init_layer(layer): #Xavier初始化的基本思想是保持输入和输出的方差一致
+    """Initialize a Linear or Convolutional layer. """
+    nn.init.xavier_uniform_(layer.weight)
+ 
+    if hasattr(layer, 'bias'):
+        if layer.bias is not None:
+            layer.bias.data.fill_(0.)
+            
     
-        output = input.transpose(2,3).contiguous().view(batch_size, dim, -1)
-        if rest > 0:
-            output = output[:, :, :-(trunk_size-rest)*group_size]
-
-        return output.contiguous()  # B, N, T
-
-    def forward(self, input, h_list):
-        pass
-
-# DPRNN for beamforming filter estimation
-class BF_module(DPRNN_base):
-    def __init__(self, *args, **kwargs):
-        super(BF_module, self).__init__(*args, **kwargs)
-
-        # gated output layer
-        self.output = nn.Sequential(nn.Conv1d(self.feature_dim, self.feature_dim, 1),
-                                    nn.Tanh()
-                                    )
-        self.output_gate = nn.Sequential(nn.Conv1d(self.feature_dim, self.feature_dim, 1),
-                                         nn.Sigmoid()
-                                         #nn.ReLU()
-                                         )
-
-    def forward(self, input, h_list1):
-        #input = input.to(device)
-        # input: (B, E, T)
-        batch_size, E, seq_length = input.shape
-
-        enc_feature = self.BN(input) # (B, E, L)-->(B, N, L)
-        # split the encoder output into overlapped, longer segments
-        enc_segments, enc_rest = self.split_feature(enc_feature, self.group_size, self.trunk_size)  # B, N, L, K: L is the group_size
-        #print('enc_segments.shape {}'.format(enc_segments.shape))
-        # pass to DPRNN
-
-        output, h_list1 = self.DPRNN(enc_segments, h_list1)
-        output = output.view(batch_size * self.num_spk, self.feature_dim, self.group_size,
-                                                   -1)  # B*nspk, N, L, K
-
-        # overlap-and-add of the outputs
-        output = self.merge_feature(output, enc_rest, self.trunk_size)  # B*nspk, N, T
-
-        # gated output layer for filter generation
-        bf_filter = self.output(output) * self.output_gate(output)  # B*nspk, K, T
-        bf_filter = bf_filter.transpose(1, 2).contiguous().view(batch_size, self.num_spk, -1,
-                                                                self.feature_dim)  # B, nspk, T, N
-
-        return bf_filter, h_list1
+def init_bn(bn):
+    """Initialize a Batchnorm layer. """
+    bn.bias.data.fill_(0.)
+    bn.weight.data.fill_(1.)
 
 
-# base module for FaSNet
-class FaSNet_base(nn.Module):
-    def __init__(self, enc_dim, feature_dim, hidden_dim, layer, group_size=34, segment_size=250, trunk_size=12,
-                 nspk=2, win_len=2):
-        super(FaSNet_base, self).__init__()
-
-        # parameters
-        self.window = win_len
-        self.stride = self.window // 2
-
-        self.enc_dim = enc_dim
-        self.feature_dim = feature_dim
-        self.hidden_dim = hidden_dim
-        self.segment_size = segment_size
-        self.group_size = group_size
-        self.trunk_size = trunk_size
-        self.layer = layer
-        self.num_spk = nspk
-        self.eps = 1e-8
-
-        # waveform encoder
-        #self.encoder = nn.Conv1d(1, self.enc_dim, self.feature_dim, bias=False)
-        self.encoder = Encoder(win_len, enc_dim, segment_size) # [B T]-->[B N L]
-        self.encoder_U = AEncoder(feat_dim=[4,8,16,32,96],trunk_size=self.trunk_size) # [B T]-->[B N L]
-        #self.enc_LN = nn.GroupNorm(1, self.enc_dim, eps=1e-8) # [B N L]-->[B N L]
-        self.separator = BF_module(self.enc_dim, self.feature_dim, self.hidden_dim,
-                                self.num_spk, self.layer, self.group_size,self.trunk_size)
-        # [B, N, L] -> [B, E, L]
-        self.mask_conv1x1 = nn.Conv1d(self.feature_dim, self.enc_dim, 1, bias=False)
-        #self.decoder = Decoder(enc_dim, win_len)
-        self.decoder = Decoder(enc_dim, 1)
-
-    def pad_input(self, input, window):
-        """
-        Zero-padding input according to window/stride size.
-        """
-        batch_size, nsample = input.shape
-        stride = window // 2
-
-        # pad the signals at the end for matching the window/stride size
-        rest = window - (stride + nsample % window) % window
-        if rest > 0:
-            pad = torch.zeros(batch_size, rest).type(input.type())
-            input = torch.cat([input, pad], 1)
-        pad_aux = torch.zeros(batch_size, stride).type(input.type())
-        input = torch.cat([pad_aux, input, pad_aux], 1)
-
-        return input, rest
-
-    def forward(self, input, mel_feat,h_list1):
-        """
-        input: shape (batch, T)
-        """
-        # pass to a DPRNN
-        #input = input.to(device)
-        B, FN, _ = input.size()
-        #print(input.shape)
-        #print(input.shape)
-        # mixture, rest = self.pad_input(input, self.window)
-        #print('mixture.shape {}'.format(mixture.shape))
-        x= self.encoder_U(input)
-        mixture_w = self.encoder(input,x,mel_feat)  # B, E, L
-        #print('mixture_w.shape {}'.format(mixture_w.shape))
-        #score_ = self.enc_LN(mixture_w) # B, E, L
-        #print('mixture_w.shape {}'.format(mixture_w.shape))
-        score_, h_list1 = self.separator(mixture_w, h_list1)  # B, nspk, T, N
-        #print('score_.shape {}'.format(score_.shape))
-        score_ = score_.view(B*self.num_spk, -1, self.feature_dim).transpose(1, 2).contiguous()  # B*nspk, N, T
-        #print('score_.shape {}'.format(score_.shape))
-        score = self.mask_conv1x1(score_)  # [B*nspk, N, L] -> [B*nspk, E, L]
-        #print('score.shape {}'.format(score.shape))
-        score = score.view(B, self.num_spk, self.enc_dim, -1)  # [B*nspk, E, L] -> [B, nspk, E, L]
-        #print('score.shape {}'.format(score.shape))
-        est_mask = F.relu(score)
-
-        #print(mixture_w.shape)
-        #print(est_mask.shape)
+class ConvBlock(nn.Module):
+    def __init__(self, in_channels, out_channels):
         
-        est_source = self.decoder(mixture_w, est_mask) # [B, E, L] + [B, nspk, E, L]--> [B, nspk, T]
-        #est_source = est_source.view(1,2,-1)
-
-        # if rest > 0:
-        #     est_source = est_source[:, :, :-rest]
-
-        return est_source, h_list1
+        super(ConvBlock, self).__init__()
         
-if __name__=='__main__':
-    from thop import profile
-    from thop import clever_format
-    print("<<Test Flops Begin>>")
-    #input.shape torch.Size([1, 252, 512])  4s?
-    #embeddingVector.shape torch.Size([1, 128])
-    batch=1
-    x1 = torch.rand(batch, 8, 1024).cuda()
-    #x2 = torch.rand(1, 128).cuda()  #embeddingVector
-    h_list = []
-    for i_list in range(5):
-        h = torch.zeros([1, batch*37,32]).type(x1.type())
-        h_list.append(h)
-    rfft_size = 512
-    model = FaSNet_base(enc_dim=96, feature_dim=32, hidden_dim=32, layer=5, group_size=37, segment_size=1024//2, trunk_size=8, nspk = 1, win_len = 2).cuda()
-    
-    y, _ = model(x1, h_list)
-    print(y.shape)
-    macs, params = profile(model, inputs=(x1, h_list, ))
-    macs, params = clever_format([macs, params], "%.3f")
-    print(macs)
-    print(params)
-    print("<<Test Flops End>>")
+        self.conv1 = nn.Conv2d(in_channels=in_channels, 
+                              out_channels=out_channels,
+                              kernel_size=(3, 3), stride=(1, 1),
+                              padding=(1, 1), bias=False)
+                              
+        self.conv2 = nn.Conv2d(in_channels=out_channels, 
+                              out_channels=out_channels,
+                              kernel_size=(3, 3), stride=(1, 1),
+                              padding=(1, 1), bias=False)
+                              
+        self.bn1 = nn.BatchNorm2d(out_channels)
+        self.bn2 = nn.BatchNorm2d(out_channels)
+
+        self.init_weight()
+        
+    def init_weight(self):
+        init_layer(self.conv1)
+        init_layer(self.conv2)
+        init_bn(self.bn1)
+        init_bn(self.bn2)
+
+        
+    def forward(self, input, pool_size=(2, 2), pool_type='avg'):
+        
+        x = input
+        x = F.relu_(self.bn1(self.conv1(x)))
+        x = F.relu_(self.bn2(self.conv2(x)))
+        if pool_type == 'max':
+            x = F.max_pool2d(x, kernel_size=pool_size)
+        elif pool_type == 'avg':
+            x = F.avg_pool2d(x, kernel_size=pool_size)
+        elif pool_type == 'avg+max':
+            x1 = F.avg_pool2d(x, kernel_size=pool_size)
+            x2 = F.max_pool2d(x, kernel_size=pool_size)
+            x = x1 + x2
+        else:
+            raise Exception('Incorrect argument!')
+        
+        return x
+
+
+class Cnn14(nn.Module):
+    def __init__(self, sample_rate, window_size, hop_size, mel_bins, fmin, 
+        fmax, classes_num, train_from_scratch = False):
+        
+        super(Cnn14, self).__init__()
+
+        self.train_from_scratch = train_from_scratch
+
+        window = 'hann'
+        center = True
+        pad_mode = 'reflect'
+        ref = 1.0
+        amin = 1e-10
+        top_db = None
+
+        # 初始化提取log mel谱图的工具函数
+        # Spectrogram extractor
+        self.spectrogram_extractor = Spectrogram(n_fft=window_size, hop_length=hop_size, 
+            win_length=window_size, window=window, center=center, pad_mode=pad_mode, 
+            freeze_parameters=True)
+
+        # Logmel feature extractor
+        self.logmel_extractor = LogmelFilterBank(sr=sample_rate, n_fft=window_size, 
+            n_mels=mel_bins, fmin=fmin, fmax=fmax, ref=ref, amin=amin, top_db=top_db, 
+            freeze_parameters=True)
+
+        # SpecAugment是一种log梅尔声谱层面上的数据增强方法，训练中使用
+        # Spec augmenter
+        self.spec_augmenter = SpecAugmentation(time_drop_width=64, time_stripes_num=2,
+            freq_drop_width=8, freq_stripes_num=2)
+
+        self.bn0 = nn.BatchNorm2d(64)
+
+        self.conv_block1 = ConvBlock(in_channels=1, out_channels=64)
+        self.conv_block2 = ConvBlock(in_channels=64, out_channels=128)
+        self.conv_block3 = ConvBlock(in_channels=128, out_channels=256)
+        self.conv_block4 = ConvBlock(in_channels=256, out_channels=512)
+        self.conv_block5 = ConvBlock(in_channels=512, out_channels=1024)
+        self.conv_block6 = ConvBlock(in_channels=1024, out_channels=2048)
+
+        self.fc1 = nn.Linear(2048, 2048, bias=True)
+
+        if self.train_from_scratch:
+            classes_num = 7
+            self.fc_gtzan = nn.Linear(2048, classes_num, bias=True)
+        else:
+            self.fc_audioset = nn.Linear(2048, classes_num, bias=True)
+
+        self.init_weight()
+
+    def init_weight(self):
+        init_bn(self.bn0)
+        init_layer(self.fc1)
+        if self.train_from_scratch:
+            init_layer(self.fc_gtzan)
+        else:
+            init_layer(self.fc_audioset)
+ 
+    def forward(self, input, mixup_lambda=None):
+        """
+        Input: (batch_size, data_length)"""
+
+        x = self.spectrogram_extractor(input)   # (batch_size, 1, time_steps, freq_bins)
+        x = self.logmel_extractor(x)    # (batch_size, 1, time_steps, mel_bins)
+        
+        x = x.transpose(1, 3)
+        x = self.bn0(x)
+        x = x.transpose(1, 3)
+        
+        if self.training:
+            x = self.spec_augmenter(x)
+
+        # Mixup on spectrogram
+        if self.training and mixup_lambda is not None:
+            x = do_mixup(x, mixup_lambda)
+
+        x = self.conv_block1(x, pool_size=(2, 2), pool_type='avg')
+        x = F.dropout(x, p=0.2, training=self.training)
+        x = self.conv_block2(x, pool_size=(2, 2), pool_type='avg')
+        x = F.dropout(x, p=0.2, training=self.training)
+        x = self.conv_block3(x, pool_size=(2, 2), pool_type='avg')
+        x = F.dropout(x, p=0.2, training=self.training)
+        x = self.conv_block4(x, pool_size=(2, 2), pool_type='avg')
+        x = F.dropout(x, p=0.2, training=self.training)
+        x = self.conv_block5(x, pool_size=(2, 2), pool_type='avg')
+        x = F.dropout(x, p=0.2, training=self.training)
+        x = self.conv_block6(x, pool_size=(1, 1), pool_type='avg')
+        x = F.dropout(x, p=0.2, training=self.training)
+        x = torch.mean(x, dim=3)
+        
+        (x1, _) = torch.max(x, dim=2)
+        x2 = torch.mean(x, dim=2)
+        x = x1 + x2
+        x = F.dropout(x, p=0.5, training=self.training)
+        x = F.relu_(self.fc1(x))
+        embedding = F.dropout(x, p=0.5, training=self.training)
+        if self.train_from_scratch:
+            # clipwise_output = torch.log_softmax(self.fc_gtzan(embedding), dim=-1)     # using softmax
+            clipwise_output = torch.sigmoid(self.fc_gtzan(x))
+        else:
+            clipwise_output = torch.sigmoid(self.fc_audioset(x))
+        
+        output_dict = {'clipwise_output': clipwise_output, 'embedding': embedding}
+
+        return output_dict
+
+
+class Transfer_Cnn14(nn.Module):
+    def __init__(self, sample_rate, window_size, hop_size, mel_bins, fmin, 
+        fmax, classes_num, freeze_base, layer_num=1):
+        """Classifier for a new task using pretrained Cnn14 as a sub module.
+        """
+        super(Transfer_Cnn14, self).__init__()
+        audioset_classes_num = 527
+        
+        self.base = Cnn14(sample_rate, window_size, hop_size, mel_bins, fmin, 
+            fmax, audioset_classes_num)
+        self.layer_num = layer_num
+
+        # Transfer to another task layer
+        if self.layer_num == 3:
+            self.fc1 = nn.Linear(2048, 2048, bias=True)
+            self.fc2 = nn.Linear(2048, 2048, bias=True)
+            self.fc_transfer = nn.Linear(2048, classes_num, bias=True)
+        else:
+            self.fc_transfer = nn.Linear(2048, classes_num, bias=True)
+
+        if freeze_base:
+            # Freeze AudioSet pretrained layers
+            for param in self.base.parameters():
+                param.requires_grad = False
+
+        self.init_weights()
+
+    def init_weights(self):
+        if self.layer_num == 3:
+            init_layer(self.fc1)
+            init_layer(self.fc2)
+            init_layer(self.fc_transfer)
+        else:
+            init_layer(self.fc_transfer)
+
+
+    def load_from_pretrain(self, pretrained_checkpoint_path):
+        checkpoint = torch.load(pretrained_checkpoint_path)
+        self.base.load_state_dict(checkpoint['model'])
+
+    def forward(self, input, mixup_lambda=None):
+        """Input: (batch_size, data_length)
+        """
+        output_dict = self.base(input, mixup_lambda)
+        embedding = output_dict['embedding']
+        if self.layer_num == 3:
+            clipwise_output = torch.log_softmax(self.fc_transfer(self.fc2(self.fc1(embedding))), dim=-1)
+            output_dict['clipwise_output'] = clipwise_output
+        else:
+            clipwise_output =  torch.log_softmax(self.fc_transfer(embedding), dim=-1)
+            output_dict['clipwise_output'] = clipwise_output
+ 
+        return output_dict
+
+
+class MobileNetV2(nn.Module):
+    def __init__(self, sample_rate, window_size, hop_size, mel_bins, fmin,
+                 fmax, classes_num, train_from_scratch = False):
+
+        super(MobileNetV2, self).__init__()
+
+        window = 'hann'
+        center = True
+        pad_mode = 'reflect'
+        ref = 1.0
+        amin = 1e-10
+        top_db = None
+
+        # Spectrogram extractor
+        self.spectrogram_extractor = Spectrogram(n_fft=window_size, hop_length=hop_size,
+                                                 win_length=window_size, window=window, center=center,
+                                                 pad_mode=pad_mode,
+                                                 freeze_parameters=True)
+
+        # Logmel feature extractor
+        self.logmel_extractor = LogmelFilterBank(sr=sample_rate, n_fft=window_size,
+                                                 n_mels=mel_bins, fmin=fmin, fmax=fmax, ref=ref, amin=amin,
+                                                 top_db=top_db,
+                                                 freeze_parameters=True)
+
+        # Spec augmenter
+        self.spec_augmenter = SpecAugmentation(time_drop_width=64, time_stripes_num=2,
+                                               freq_drop_width=8, freq_stripes_num=2)
+
+        self.bn0 = nn.BatchNorm2d(64)
+
+        width_mult = 1.
+        block = InvertedResidual
+        input_channel = 32
+        last_channel = 1280
+        interverted_residual_setting = [
+            # t, c, n, s
+            [1, 16, 1, 1],
+            [6, 24, 2, 2],
+            [6, 32, 3, 2],
+            [6, 64, 4, 2],
+            [6, 96, 3, 2],
+            [6, 160, 3, 1],
+            [6, 320, 1, 1],
+        ]
+
+        def conv_bn(inp, oup, stride):
+            _layers = [
+                nn.Conv2d(inp, oup, 3, 1, 1, bias=False),
+                nn.AvgPool2d(stride),
+                nn.BatchNorm2d(oup),
+                nn.ReLU6(inplace=True)
+            ]
+            _layers = nn.Sequential(*_layers)
+            init_layer(_layers[0])
+            init_bn(_layers[2])
+            return _layers
+
+        def conv_1x1_bn(inp, oup):
+            _layers = nn.Sequential(
+                nn.Conv2d(inp, oup, 1, 1, 0, bias=False),
+                nn.BatchNorm2d(oup),
+                nn.ReLU6(inplace=True)
+            )
+            init_layer(_layers[0])
+            init_bn(_layers[1])
+            return _layers
+
+        # building first layer
+        input_channel = int(input_channel * width_mult)
+        self.last_channel = int(last_channel * width_mult) if width_mult > 1.0 else last_channel
+        self.features = [conv_bn(1, input_channel, 2)]
+        # building inverted residual blocks
+        for t, c, n, s in interverted_residual_setting:
+            output_channel = int(c * width_mult)
+            for i in range(n):
+                if i == 0:
+                    self.features.append(block(input_channel, output_channel, s, expand_ratio=t))
+                else:
+                    self.features.append(block(input_channel, output_channel, 1, expand_ratio=t))
+                input_channel = output_channel
+        # building last several layers
+        self.features.append(conv_1x1_bn(input_channel, self.last_channel))
+        # make it nn.Sequential
+        self.features = nn.Sequential(*self.features)
+
+        self.fc1 = nn.Linear(1280, 1024, bias=True)
+        classes_num = 7
+        self.fc_audioset = nn.Linear(1024, classes_num, bias=True)
+
+        self.init_weight()
+
+    def init_weight(self):
+        init_bn(self.bn0)
+        init_layer(self.fc1)
+        init_layer(self.fc_audioset)
+
+    def forward(self, input, mixup_lambda=None):
+        """
+        Input: (batch_size, data_length)"""
+
+        x = self.spectrogram_extractor(input)  # (batch_size, 1, time_steps, freq_bins)    relate to nn.Conv1D
+        x = self.logmel_extractor(x)  # (batch_size, 1, time_steps, mel_bins)
+
+        x = x.transpose(1, 3)
+        x = self.bn0(x)
+        x = x.transpose(1, 3)
+
+        if self.training:
+            x = self.spec_augmenter(x)
+
+        # Mixup on spectrogram
+        if self.training and mixup_lambda is not None:
+            x = do_mixup(x, mixup_lambda)
+
+        x = self.features(x)
+
+        x = torch.mean(x, dim=3)
+
+        (x1, _) = torch.max(x, dim=2)
+        x2 = torch.mean(x, dim=2)
+        x = x1 + x2
+        # x = F.dropout(x, p=0.5, training=self.training)
+        x = F.relu_(self.fc1(x))
+        embedding = F.dropout(x, p=0.5, training=self.training)
+        clipwise_output = torch.sigmoid(self.fc_audioset(x))
+
+        output_dict = {'clipwise_output': clipwise_output, 'embedding': embedding}
+
+        return output_dict
+
+class InvertedResidual(nn.Module):
+    def __init__(self, inp, oup, stride, expand_ratio):
+        super(InvertedResidual, self).__init__()
+        self.stride = stride
+        assert stride in [1, 2]
+
+        hidden_dim = round(inp * expand_ratio)
+        self.use_res_connect = self.stride == 1 and inp == oup
+
+        if expand_ratio == 1:
+            _layers = [
+                nn.Conv2d(hidden_dim, hidden_dim, 3, 1, 1, groups=hidden_dim, bias=False),
+                nn.AvgPool2d(stride),
+                nn.BatchNorm2d(hidden_dim),
+                nn.ReLU6(inplace=True),
+                nn.Conv2d(hidden_dim, oup, 1, 1, 0, bias=False),
+                nn.BatchNorm2d(oup)
+                ]
+            _layers = nn.Sequential(*_layers)
+            init_layer(_layers[0])
+            init_bn(_layers[2])
+            init_layer(_layers[4])
+            init_bn(_layers[5])
+            self.conv = _layers
+        else:
+            _layers = [
+                nn.Conv2d(inp, hidden_dim, 1, 1, 0, bias=False),             #1*1 expansion layer
+                nn.BatchNorm2d(hidden_dim),
+                nn.ReLU6(inplace=True),
+                nn.Conv2d(hidden_dim, hidden_dim, 3, 1, 1, groups=hidden_dim, bias=False), #3*3 depthwise convolution
+                nn.AvgPool2d(stride),
+                nn.BatchNorm2d(hidden_dim),
+                nn.ReLU6(inplace=True),
+                nn.Conv2d(hidden_dim, oup, 1, 1, 0, bias=False),             #1*1 projection layer
+                nn.BatchNorm2d(oup)
+                ]
+            _layers = nn.Sequential(*_layers)
+            init_layer(_layers[0])
+            init_bn(_layers[1])
+            init_layer(_layers[3])
+            init_bn(_layers[5])
+            init_layer(_layers[7])
+            init_bn(_layers[8])
+            self.conv = _layers
+
+    def forward(self, x):
+        if self.use_res_connect:
+            return x + self.conv(x)
+        else:
+            return self.conv(x)
