@@ -16,59 +16,6 @@ from torch.autograd import Variable
 
 EPS = 1e-8
 
-class AEncoder(nn.Module):
-    def __init__(self,feat_dim=[4,8,16,32,96],trunk_size=10):
-        super(AEncoder, self).__init__()
-        #self.pad1 = nn.ConstantPad2d((0, 0, 1, 0), value=0.)
-        #self.pad2 = nn.ConstantPad2d((1, 1, 1, 0), value=0.)
-        self.en1 = nn.Conv2d(1, feat_dim[0], kernel_size=(3, 4), stride=(2, 2),padding=(0,0)) #,bias=False
-        self.act1= nn.ELU(alpha=1.0)    
-        self.en2 =  nn.Conv2d(feat_dim[0], feat_dim[1], kernel_size=(3, 4), stride=(2, 2),padding=(0,0))
-        self.act2= nn.ELU(alpha=1.0)   
-        self.en3 = nn.Conv2d(feat_dim[1], feat_dim[2], kernel_size=(1, 4), stride=(1, 2),padding=(0,0))
-        self.act3= nn.ELU(alpha=1.0)   
-        self.en4 =  nn.Conv2d(feat_dim[2], feat_dim[3], kernel_size=(1, 4), stride=(1, 2),padding=(0,0))
-        self.act4= nn.ELU(alpha=1.0)    
-        self.en5 =  nn.Conv2d(feat_dim[3], feat_dim[4], kernel_size=(1, 4), stride=(1, 2),padding=(0,0))
-        self.act5= nn.ELU(alpha=1.0)
-        self.freq_upsampling= nn.Linear(30,37)
-        self.enc = feat_dim[4]
-        self.trunk_size = trunk_size
-    def forward(self, x):
-        #x_list = []
-        x = x.unsqueeze(dim=1)
-        
-        B,C,T,Freq = x.shape
-        rest = (T-T//self.trunk_size*self.trunk_size)
-        #print('x:',x.shape,rest) 
-        if rest>0 :
-           x = torch.cat([x,torch.zeros([B,C,self.trunk_size-rest,Freq]).cuda()],dim=2)
-        
-        x=x.reshape(B,C,-1,self.trunk_size,Freq)
-        x=x.permute(0,2,1,3,4)
-        x=x.reshape(-1,C,self.trunk_size,Freq)
-        #print('layer1:',x.shape,self.trunk_size)
-        x = self.act1(self.en1(x))
-        #print('layer1:',x.shape)
-        x = self.act2(self.en2(x))
-        #print('layer2:',x.shape)
-        x = self.act3(self.en3(x))
-        #print('layer3:',x.shape)
-        x = self.act4(self.en4(x))
-        #print('layer4:',x.shape)
-        x = self.act5(self.en5(x))
-        #print('layer5:',x.shape)
-        
-        x = self.freq_upsampling(x)
-        x=x.repeat(1,1,self.trunk_size,1)  ##  
-       
-        x= x.permute(0,2,1,3)
-        x=x.reshape(B,-1,self.enc,37)
-        
-        if rest >0 :
-           x= x[:,:-(self.trunk_size-rest),:,:]
-        
-        return x.reshape(-1,self.enc,37)
         
 
 class Encoder(nn.Module):
@@ -86,11 +33,11 @@ class Encoder(nn.Module):
         self.conv1d_U_Subband2 = nn.Conv1d(1, N, kernel_size=12, stride=8, padding=0, bias=False)       # 4b*8 = 32b: 16~47
         self.conv1d_U_Subband3 = nn.Conv1d(1, N, kernel_size=20, stride=16, padding=0, bias=False)      # 8b*10 = 80b: 48~127
         self.conv1d_U_Subband4 = nn.Conv1d(1, N, kernel_size=36, stride=32, padding=0, bias=False)      # 16b*8 = 128b: 128~255                
-        self.conv1d_U_Subband5 = nn.Conv1d(1, N, kernel_size=128, stride=128, padding=0, bias=False)      #16b*8 = 128b: 256~384  
-        self.conv1d_U_Subband6 = nn.Conv1d(1, N, kernel_size=258, stride=256, padding=0, bias=False)      # 32b*4 = 256b: 384~512
+        self.conv1d_U_Subband5 = nn.Conv1d(1, N, kernel_size=64, stride=64, padding=0, bias=False)      #16b*8 = 128b: 256~384  
+        self.conv1d_U_Subband6 = nn.Conv1d(1, N, kernel_size=128, stride=128, padding=0, bias=False)      # 32b*4 = 256b: 384~512
         
                 
-    def forward(self, mixture,x_glob,mel_feat):
+    def forward(self, mixture):
         """
         Args:
             mixture: [B, T], B is batch size, T is #samples
@@ -115,8 +62,8 @@ class Encoder(nn.Module):
         mixture_w_subband6 = F.relu(self.conv1d_U_Subband6(mixture_subband6))  # [B, N, 4]
         mixture_w = torch.cat([mixture_w_subband1, mixture_w_subband2, mixture_w_subband3, mixture_w_subband4, mixture_w_subband5, mixture_w_subband6], axis=2)
         #print(mixture_w_subband1.shape,mixture_w_subband2.shape,mixture_w_subband3.shape,mixture_w_subband4.shape,mixture_w_subband5.shape,mixture_w_subband6.shape)
-        #print(mixture_w.shape,x_glob.shape,mel_feat.shape)
-        mixture_w = mixture_w+x_glob+mel_feat
+        #print(mixture_w.shape)
+        mixture_w = mixture_w
         mixture_w = mixture_w.permute(0,2,1).contiguous().view(batch_size, -1, self.N).permute(0,2,1).contiguous()
         
         #mixture_z = self.rnn(mixture_w.permute(0, 2, 1))
@@ -135,8 +82,8 @@ class Decoder(nn.Module):
         self.basis_signals_subband2 = nn.Linear(E, 8, bias=False)
         self.basis_signals_subband3 = nn.Linear(E, 16, bias=False)
         self.basis_signals_subband4 = nn.Linear(E, 32, bias=False)
-        self.basis_signals_subband5 = nn.Linear(E, 128, bias=False)
-        self.basis_signals_subband6 = nn.Linear(E, 256, bias=False)
+        self.basis_signals_subband5 = nn.Linear(E, 64, bias=False)
+        self.basis_signals_subband6 = nn.Linear(E, 128, bias=False)
 
     def forward(self, mixture_w, est_mask):
         """
@@ -155,13 +102,13 @@ class Decoder(nn.Module):
         #source_w = est_mask  # [B, C, E, L]
         source_w = torch.transpose(source_w, 2, 3) # [B, C, L, E]
         s = source_w.shape
-        source_w = source_w.view(s[0], s[1], -1, 37, s[3])
+        source_w = source_w.view(s[0], s[1], -1, 40, s[3])
         source_w_subband1 = source_w[:,:,:,0:8,:]
         source_w_subband2 = source_w[:, :, :, 8:16, :]
         source_w_subband3 = source_w[:, :, :, 16:26, :]
         source_w_subband4 = source_w[:, :, :, 26:34, :]
-        source_w_subband5 = source_w[:, :, :, 34:36, :]
-        source_w_subband6 = source_w[:, :, :, 36:37, :]
+        source_w_subband5 = source_w[:, :, :, 34:38, :]
+        source_w_subband6 = source_w[:, :, :, 38:40, :]
 
         # S = DV
         #est_source = self.basis_signals(source_w)  # [B, C, L, W]
@@ -290,24 +237,23 @@ class DPRNN(nn.Module):
         # dual-path RNN
         self.trunk_rnn = nn.ModuleList([])
         self.row_rnn = nn.ModuleList([])
-        self.col_rnn1 = nn.ModuleList([])
-        self.col_rnn2 = nn.ModuleList([])
+        self.col_rnn = nn.ModuleList([])
+       
         self.proj_col = nn.ModuleList([])
         #self.row_norm = nn.ModuleList([])
         #self.col_norm = nn.ModuleList([])
         for i in range(num_layers):
             self.row_rnn.append(SingleRNN('LSTM', input_size, hidden_size, dropout,
                                           bidirectional=True))  # intra-segment RNN is always noncausal
-            self.col_rnn1.append(ColSingleRNN('GRU', input_size, hidden_size, dropout, bidirectional=False))
-            self.col_rnn2.append(ColSingleRNN('GRU', input_size, hidden_size, dropout, bidirectional=False))
-            self.proj_col.append(nn.Linear(hidden_size*2,hidden_size))
+            self.col_rnn.append(ColSingleRNN('GRU', input_size, hidden_size, dropout, bidirectional=False))
+            #self.proj_col.append(nn.Linear(hidden_size*2,hidden_size))
 
         # output layer
         self.output = nn.Sequential(nn.ReLU(),
                                     nn.Conv2d(input_size, output_size, 1)
                                     )
 
-    def forward(self, input, h_list1):
+    def forward(self, input, h_list):
         # input shape: batch, N, dim1, dim2
         # apply RNN on dim1 first and then dim2
         # output shape: B, output_size, dim1, dim2
@@ -316,6 +262,7 @@ class DPRNN(nn.Module):
         #print(input.shape)
         output = input
         j = 0
+        h_list1 = torch.zeros_like(h_list).type(h_list.type())   
         for i in range(len(self.row_rnn)):
             row_input = output.permute(0, 3, 2, 1).contiguous().view(batch_size*dim2, dim1, N)  # B*dim2, dim1, N
             row_output = self.row_rnn[i](row_input)  # B*dim2, dim1, H
@@ -325,43 +272,16 @@ class DPRNN(nn.Module):
             row_output = row_output.view(batch_size, dim2, dim1, -1).permute(0, 3, 2,
                                                                              1).contiguous()  # B, N, dim1, dim2
             output = output + row_output
-            #row_input = output.permute(0, 3, 2, 1).contiguous().view(batch_size, -1, N)  # B*dim2, dim1, N
-            #row_output = self.row_rnn[i](row_input)  # B*dim2, dim1, H
-
-            #col_input = output.permute(0, 2, 3, 1).contiguous().view(batch_size*dim1, dim2, -1)  # B*dim1, dim2, N
-            col_input = output.permute(0, 2, 3, 1).contiguous().view(batch_size*dim1*dim2//self.trunk_size, self.trunk_size, -1)  # B*dim1, dim2, N
-            col_input = col_input.reshape(batch_size*dim1,dim2//self.trunk_size, self.trunk_size, -1)
-            col_output = torch.zeros([batch_size*dim1, dim2//self.trunk_size, self.trunk_size, self.input_size]).type(col_input.type())
-            
-            for cl in range(dim2//self.trunk_size):
-            #h[1:,:,:] = torch.zeros([1, batch_size*dim1, self.input_size]).type(col_input.type())
-            #col_output[:,cl], h = self.col_rnn[i](col_input_1,h)  # B*dim1, dim2, H
-               h = h_list1[i]
-               col_input_1 = col_input[:,cl,:,:]               
-               col_output1, h1 = self.col_rnn1[i](col_input_1,h)  # B*dim1, dim2, H
-               #print(h1.shape,h_list1[i].shape,i,col_output1.shape)
-               h_list1[i] = h1
-               col_output2, h2 = self.col_rnn2[i](col_input_1.flip(1),h1)  # B*dim1, dim2, H
-               col_output2 = col_output2.flip(1)
-               col_output[:,cl]  = self.proj_col[i](torch.cat([col_output1,col_output2],-1))
+        
+            col_input = output.permute(0, 2, 3, 1).contiguous().view(batch_size*dim1,dim2, -1)  # B*dim1, dim2, N            
+            col_output = torch.zeros([batch_size*dim1, dim2,self.input_size]).type(col_input.type())
+            h=h_list[i]                        
+            col_output, h = self.col_rnn[i](col_input,h)  # B*dim1, dim2, H
+            h_list1[i]=h  
             col_output = col_output.reshape(batch_size, dim1, dim2, -1).permute(0, 3, 1,
                                                                                 2).contiguous()  # B, N, dim1, dim2
             output = output + col_output
-
             
-#            if i == 1 or i == 4:
-#                trunk_input = output.permute(0, 2, 3, 1).contiguous().view(batch_size*dim1, dim2, -1)  # B*dim1, dim2, N
-#                trunk_input = trunk_input.reshape(batch_size*dim1, dim2//12, 12, -1).permute(0, 2, 1, 3).reshape(batch_size*dim1*12, dim2//12, -1)
-#                h = h_list2[j]
-#                #ipdb.set_trace()
-#                trunk_output, h = self.trunk_rnn[j](trunk_input, h)  # B*dim1, dim2, H
-#                h_list2[j] = h 
-#                trunk_output = trunk_output.reshape(batch_size*dim1, 12, dim2//12, -1).permute(0, 2, 1, 3)
-#                trunk_output = trunk_output.reshape(batch_size, dim1, dim2, -1).permute(0, 3, 1,
-#                                                                                 2).contiguous()  # B, N, dim1, dim2
-#                output = output + trunk_output
-#                j = j+1
-
         output = self.output(output) # B, output_size, dim1, dim2
 
         return output, h_list1
@@ -463,7 +383,7 @@ class BF_module(DPRNN_base):
                                          #nn.ReLU()
                                          )
 
-    def forward(self, input, h_list1):
+    def forward(self, input, h_list):
         #input = input.to(device)
         # input: (B, E, T)
         batch_size, E, seq_length = input.shape
@@ -474,7 +394,7 @@ class BF_module(DPRNN_base):
         #print('enc_segments.shape {}'.format(enc_segments.shape))
         # pass to DPRNN
 
-        output, h_list1 = self.DPRNN(enc_segments, h_list1)
+        output, h_list1 = self.DPRNN(enc_segments, h_list)
         output = output.view(batch_size * self.num_spk, self.feature_dim, self.group_size,
                                                    -1)  # B*nspk, N, L, K
 
@@ -512,14 +432,15 @@ class FaSNet_base(nn.Module):
         # waveform encoder
         #self.encoder = nn.Conv1d(1, self.enc_dim, self.feature_dim, bias=False)
         self.encoder = Encoder(win_len, enc_dim, segment_size) # [B T]-->[B N L]
-        self.encoder_U = AEncoder(feat_dim=[4,8,16,32,96],trunk_size=self.trunk_size) # [B T]-->[B N L]
+        
         #self.enc_LN = nn.GroupNorm(1, self.enc_dim, eps=1e-8) # [B N L]-->[B N L]
         self.separator = BF_module(self.enc_dim, self.feature_dim, self.hidden_dim,
                                 self.num_spk, self.layer, self.group_size,self.trunk_size)
         # [B, N, L] -> [B, E, L]
         self.mask_conv1x1 = nn.Conv1d(self.feature_dim, self.enc_dim, 1, bias=False)
         #self.decoder = Decoder(enc_dim, win_len)
-        self.decoder = Decoder(enc_dim, 1)
+        self.decoder1 = Decoder(enc_dim, 1)
+        self.decoder2 = Decoder(enc_dim, 1)
 
     def pad_input(self, input, window):
         """
@@ -538,7 +459,7 @@ class FaSNet_base(nn.Module):
 
         return input, rest
 
-    def forward(self, input, mel_feat,h_list1):
+    def forward(self, input, h_list):
         """
         input: shape (batch, T)
         """
@@ -549,12 +470,12 @@ class FaSNet_base(nn.Module):
         #print(input.shape)
         # mixture, rest = self.pad_input(input, self.window)
         #print('mixture.shape {}'.format(mixture.shape))
-        x= self.encoder_U(input)
-        mixture_w = self.encoder(input,x,mel_feat)  # B, E, L
+       
+        mixture_w = self.encoder(input)  # B, E, L
         #print('mixture_w.shape {}'.format(mixture_w.shape))
         #score_ = self.enc_LN(mixture_w) # B, E, L
         #print('mixture_w.shape {}'.format(mixture_w.shape))
-        score_, h_list1 = self.separator(mixture_w, h_list1)  # B, nspk, T, N
+        score_, h_list1 = self.separator(mixture_w, h_list)  # B, nspk, T, N
         #print('score_.shape {}'.format(score_.shape))
         score_ = score_.view(B*self.num_spk, -1, self.feature_dim).transpose(1, 2).contiguous()  # B*nspk, N, T
         #print('score_.shape {}'.format(score_.shape))
@@ -567,8 +488,9 @@ class FaSNet_base(nn.Module):
         #print(mixture_w.shape)
         #print(est_mask.shape)
         
-        est_source = self.decoder(mixture_w, est_mask) # [B, E, L] + [B, nspk, E, L]--> [B, nspk, T]
-        #est_source = est_source.view(1,2,-1)
+        est_source1 = self.decoder1(mixture_w, est_mask[:,0:1]) # [B, E, L] + [B, nspk, E, L]--> [B, nspk, T]
+        est_source2 = self.decoder2(mixture_w, est_mask[:,1:]) # [B, E, L] + [B, nspk, E, L]--> [B, nspk, T]
+        est_source = torch.cat([est_source1,est_source2],dim=1)
 
         # if rest > 0:
         #     est_source = est_source[:, :, :-rest]
@@ -579,17 +501,22 @@ if __name__=='__main__':
     from thop import profile
     from thop import clever_format
     print("<<Test Flops Begin>>")
+    #1.155G
+    #622.720K
+
+    #
     #input.shape torch.Size([1, 252, 512])  4s?
     #embeddingVector.shape torch.Size([1, 128])
     batch=1
-    x1 = torch.rand(batch, 8, 1024).cuda()
+    x1 = torch.rand(batch, 50, 1024).cuda()
     #x2 = torch.rand(1, 128).cuda()  #embeddingVector
-    h_list = []
-    for i_list in range(5):
-        h = torch.zeros([1, batch*37,32]).type(x1.type())
-        h_list.append(h)
+#    h_list = []
+#    for i_list in range(5):
+#        h = torch.zeros([1, batch*40,64]).type(x1.type())
+#        h_list.append(h)
+    h_list = torch.zeros([5,1, batch*40,64]).type(x1.type()) 
     rfft_size = 512
-    model = FaSNet_base(enc_dim=96, feature_dim=32, hidden_dim=32, layer=5, group_size=37, segment_size=1024//2, trunk_size=8, nspk = 1, win_len = 2).cuda()
+    model = FaSNet_base(enc_dim=96, feature_dim=64, hidden_dim=64, layer=5, group_size=40, segment_size=1024//2, trunk_size=1, nspk = 2, win_len = 2).cuda()
     
     y, _ = model(x1, h_list)
     print(y.shape)
