@@ -135,6 +135,8 @@ class Decoder(nn.Module):
         #est_source = overlap_and_add(est_source, self.W//2) # B x C x T
         #est_source = overlap_and_add(est_source, 1)  # B x C x T
         return est_source
+
+
 class ColSingleRNN(nn.Module):
     """
     Container module for a single RNN layer.
@@ -514,10 +516,10 @@ if __name__=='__main__':
 #    for i_list in range(5):
 #        h = torch.zeros([1, batch*40,64]).type(x1.type())
 #        h_list.append(h)
-    h_list = torch.zeros([5,1, batch*40,64]).type(x1.type()) 
+    h_list = torch.zeros([5,1, batch*40,64]).type(x1.type())
     rfft_size = 512
     model = FaSNet_base(enc_dim=96, feature_dim=64, hidden_dim=64, layer=5, group_size=40, segment_size=1024//2, trunk_size=1, nspk = 2, win_len = 2).cuda()
-    
+
     y, _ = model(x1, h_list)
     print(y.shape)
     macs, params = profile(model, inputs=(x1, h_list, ))

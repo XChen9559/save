@@ -6,41 +6,13 @@ import math
 import torch
 from torch import Tensor
 #import matplotlib.pyplot as plt
-import numpy as np
+import numpy
 from torch.autograd import Function
 pyv = '180'  #'041'  '180   '
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-def freq_to_mel(f,nk):
-    return 1127.01048*np.log(f*2**(nk/12)/700+1)
-
-def mel_to_req(f_mel,nk):
-    return  (10**(f_mel/1127.01048)-1)*700/(2**(nk/12))
-        
-def mel_octal(fs,fft_size,nbins):
-    #fmin=0
-    #fmax=fs//2
-    fmin=0
-    fmax = fs//2
-    f_mel_min = freq_to_mel(fmin,0)
-    f_mel_max = freq_to_mel(fmax,nbins)
-    
-    mel_feat=torch.zeros([fft_size,nbins])
-    f_mel_nb = torch.linspace(f_mel_min,f_mel_max,nbins+2)  ###均匀分组在mel刻度上
-    #f_nb = mel_to_req(f_mel_nb)
-    #print(f_mel_nb.shape)
-    for i in range(1,nbins+1):
-        f0=f_mel_nb[i]
-        #n1 = int(f_nb[i-1]/fs*fft_size)
-        #n2 = int(f_nb[i+1]/fs*fft_size)
-        n1 =int(mel_to_req(f_mel_nb[i-1],i))
-        n2 =int(mel_to_req(f_mel_nb[i+1],i))
-        mel_feat[n1:n2,i-1]=1  ##可替换成三角函数
-    return mel_feat
-    
-    
-win_hop960 = torch.sin(torch.Tensor(np.pi * np.array(range(576)) / (576 - 1)) / 2)
+win_hop960 = torch.sin(torch.Tensor(numpy.pi * numpy.array(range(576)) / (576 - 1)) / 2)
 win_hop960 = torch.cat([win_hop960, torch.ones(1536 - 2 * 576), win_hop960.flip(0)], 0)
 win_hop960 = win_hop960.to(device)
 
